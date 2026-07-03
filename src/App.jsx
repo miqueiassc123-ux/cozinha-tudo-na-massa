@@ -13,17 +13,70 @@ export default function App() {
   const [toast, setToast] = useState("");
   const [filtroStatus, setFiltroStatus] = useState("TODOS");
   const [pedidoSelecionado, setPedidoSelecionado] = useState(null);
+  const [pedidosAnterior, setPedidosAnterior] = useState([]);
+
+  // FUNÇÃO PARA TOCAR SOM
+  const tocarSomNotificacao = () => {
+    try {
+      const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      const oscillator = audioContext.createOscillator();
+      const gainNode = audioContext.createGain();
+      
+      oscillator.connect(gainNode);
+      gainNode.connect(audioContext.destination);
+      
+      // Som mais alto e perceptível
+      oscillator.frequency.value = 800;
+      oscillator.type = 'sine';
+      
+      gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
+      gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.5);
+      
+      oscillator.start(audioContext.currentTime);
+      oscillator.stop(audioContext.currentTime + 0.5);
+    } catch (error) {
+      console.log("Som não disponível");
+    }
+  };
+
+  // FUNÇÃO PARA ABRIR WHATSAPP
+  const abrirWhatsApp = (telefone, pedidoId) => {
+    const mensagem = `Olá! Seu pedido #${pedidoId} está sendo preparado. Acompanhe o status em tempo real!`;
+    const urlWhatsApp = `https://wa.me/${telefone.replace(/\D/g, '')}?text=${encodeURIComponent(mensagem)}`;
+    window.open(urlWhatsApp, '_blank');
+  };
+
+  // FUNÇÃO PARA ABRIR LOCALIZAÇÃO
+  const abrirLocalizacao = (endereco) => {
+    const urlMaps = `https://www.google.com/maps/search/${encodeURIComponent(endereco)}`;
+    window.open(urlMaps, '_blank');
+  };
 
   const carregarDados = useCallback(async () => {
     try {
       const { data: peds } = await supabase.from("pedidos").select("*").order("created_at", { ascending: false });
       const { data: prods } = await supabase.from("produtos").select("*");
-      if (peds) setPedidos(peds);
+      
+      if (peds) {
+        // Detectar novos pedidos
+        const novosPedidos = peds.filter(p => 
+          p.status === "PENDENTE" && 
+          !pedidosAnterior.some(pa => pa.id === p.id)
+        );
+        
+        if (novosPedidos.length > 0) {
+          tocarSomNotificacao();
+          mostrarToast(`🔔 ${novosPedidos.length} novo${novosPedidos.length > 1 ? 's' : ''} pedido${novosPedidos.length > 1 ? 's' : ''}!`);
+        }
+        
+        setPedidosAnterior(peds);
+        setPedidos(peds);
+      }
       if (prods) setProdutos(prods);
     } catch (error) {
       mostrarToast("Erro ao carregar dados");
     }
-  }, []);
+  }, [pedidosAnterior]);
 
   useEffect(() => {
     carregarDados();
@@ -126,7 +179,7 @@ export default function App() {
     <div className="min-h-screen bg-slate-50 p-4">
       {/* Toast */}
       {toast && (
-        <div className="fixed top-4 right-4 bg-green-500 text-white px-4 py-3 rounded-lg shadow-lg z-50">
+        <div className="fixed top-4 right-4 bg-green-500 text-white px-4 py-3 rounded-lg shadow-lg z-50 animate-bounce">
           {toast}
         </div>
       )}
@@ -182,7 +235,11 @@ export default function App() {
               {pedidosFiltrados.map(p => (
                 <div 
                   key={p.id} 
-                  className="bg-white p-5 rounded-2xl shadow-md border-2 border-slate-200 hover:border-orange-400 hover:shadow-lg transition-all cursor-pointer"
+                  className={`bg-white p-5 rounded-2xl shadow-md border-2 transition-all cursor-pointer ${
+                    p.status === "PENDENTE" 
+                      ? "border-red-400 hover:shadow-lg hover:border-red-600" 
+                      : "border-slate-200 hover:border-orange-400 hover:shadow-lg"
+                  }`}
                   onClick={() => setPedidoSelecionado(p)}
                 >
                   <div className="flex justify-between items-start mb-3">
@@ -231,7 +288,33 @@ export default function App() {
                     <p className="text-lg font-black text-orange-600">R$ {Number(p.total).toFixed(2).replace('.', ',')}</p>
                   </div>
 
-                  {/* Botão de Ação */}
+                  {/* Botões de Ação */}
+                  <div className="flex gap-2 mb-3">
+                    {p.tipo_consumo === "DELIVERY" && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          abrirLocalizacao(p.localizacao);
+                        }}
+                        className="flex-1 bg-blue-500 hover:bg-blue-600 text-white py-2 rounded-lg font-bold text-sm transition-all"
+                        title="Abrir no Google Maps"
+                      >
+                        📍 Localização
+                      </button>
+                    )}
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        abrirWhatsApp(p.cliente_telefone, p.id);
+                      }}
+                      className="flex-1 bg-green-500 hover:bg-green-600 text-white py-2 rounded-lg font-bold text-sm transition-all"
+                      title="Enviar mensagem no WhatsApp"
+                    >
+                      💬 WhatsApp
+                    </button>
+                  </div>
+
+                  {/* Botão de Status */}
                   {p.status !== "CONCLUIDO" && (
                     <button 
                       onClick={(e) => {
@@ -354,7 +437,29 @@ export default function App() {
               </div>
             </div>
 
-            <div className="mt-6 flex gap-2">
+            <div className="mt-6 flex gap-2 flex-col">
+              <div className="flex gap-2">
+                {pedidoSelecionado.tipo_consumo === "DELIVERY" && (
+                  <button
+                    onClick={() => {
+                      abrirLocalizacao(pedidoSelecionado.localizacao);
+                      setPedidoSelecionado(null);
+                    }}
+                    className="flex-1 bg-blue-500 hover:bg-blue-600 text-white py-2 rounded-lg font-bold transition-all"
+                  >
+                    📍 Localização
+                  </button>
+                )}
+                <button
+                  onClick={() => {
+                    abrirWhatsApp(pedidoSelecionado.cliente_telefone, pedidoSelecionado.id);
+                    setPedidoSelecionado(null);
+                  }}
+                  className="flex-1 bg-green-500 hover:bg-green-600 text-white py-2 rounded-lg font-bold transition-all"
+                >
+                  💬 WhatsApp
+                </button>
+              </div>
               {pedidoSelecionado.status !== "CONCLUIDO" && (
                 <button
                   onClick={() => {
@@ -362,14 +467,14 @@ export default function App() {
                     setPedidoSelecionado(null);
                   }}
                   disabled={loading}
-                  className="flex-1 bg-orange-600 text-white py-3 rounded-lg font-bold hover:bg-orange-700 disabled:opacity-50"
+                  className="w-full bg-orange-600 hover:bg-orange-700 text-white py-3 rounded-lg font-bold disabled:opacity-50"
                 >
                   {pedidoSelecionado.status === "PENDENTE" ? "▶️ INICIAR PREPARO" : "✅ CONCLUIR"}
                 </button>
               )}
               <button
                 onClick={() => setPedidoSelecionado(null)}
-                className="flex-1 bg-slate-200 text-slate-700 py-3 rounded-lg font-bold hover:bg-slate-300"
+                className="w-full bg-slate-200 text-slate-700 py-3 rounded-lg font-bold hover:bg-slate-300"
               >
                 Fechar
               </button>
