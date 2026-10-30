@@ -1,269 +1,479 @@
-import { useState, useEffect, useCallback } from "react";
-import { supabase } from "./supabaseClient";
+import { useEffect, useMemo, useState, useCallback } from 'react'
+// Cliente Supabase criado em src/supabaseClient.js (export nomeado `supabase`)
+import { supabase } from './supabaseClient'
 
-export default function App() {
-  const [aba, setAba] = useState("pedidos");
-  const [pedidos, setPedidos] = useState([]);
-  const [produtos, setProdutos] = useState([]);
-  const [novoProd, setNovoProd] = useState({ 
-    nome: "", preco: "", categoria: "", descricao: "", ingredientes: "" 
-  });
-  const [editandoId, setEditandoId] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [toast, setToast] = useState("");
-  const [filtroStatus, setFiltroStatus] = useState("TODOS");
-  const [pedidoSelecionado, setPedidoSelecionado] = useState(null);
-  const [pedidosAnterior, setPedidosAnterior] = useState([]);
+// ---------------------------------------------------------------------------
+// Constantes e helpers
+// ---------------------------------------------------------------------------
+const STATUS_FLOW = {
+  PENDENTE: { next: 'PREPARANDO', label: 'Iniciar preparo' },
+  PREPARANDO: { next: 'CONCLUIDO', label: 'Marcar como concluído' },
+  CONCLUIDO: { next: null, label: '' },
+}
 
-  // FUNÇÃO PARA TOCAR SOM
-  const tocarSomNotificacao = () => {
+const COLUNAS = [
+  { key: 'PENDENTE', titulo: 'Pendentes', dot: 'bg-amber-500' },
+  { key: 'PREPARANDO', titulo: 'Em preparo', dot: 'bg-sky-500' },
+  { key: 'CONCLUIDO', titulo: 'Concluídos', dot: 'bg-emerald-500' },
+]
+
+const FORM_VAZIO = {
+  nome: '',
+  preco: '',
+  categoria: '',
+  descricao: '',
+  ingredientes: '',
+  ativo: true,
+}
+
+const brl = (v) =>
+  Number(v || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })
+
+const horaCurta = (iso) =>
+  iso
+    ? new Date(iso).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+    : ''
+
+// A coluna "itens" pode ser texto, array de strings ou jsonb com objetos.
+function formatarItens(itens) {
+  if (!itens) return []
+  let lista = itens
+  if (typeof itens === 'string') {
     try {
-      const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-      const oscillator = audioContext.createOscillator();
-      const gainNode = audioContext.createGain();
-      
-      oscillator.connect(gainNode);
-      gainNode.connect(audioContext.destination);
-      
-      // Som mais alto e perceptível
-      oscillator.frequency.value = 800;
-      oscillator.type = 'sine';
-      
-      gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
-      gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.5);
-      
-      oscillator.start(audioContext.currentTime);
-      oscillator.stop(audioContext.currentTime + 0.5);
-    } catch (error) {
-      console.log("Som não disponível");
+      const parsed = JSON.parse(itens)
+      lista = Array.isArray(parsed) ? parsed : [itens]
+    } catch {
+      return itens.split(/\n|,/).map((s) => s.trim()).filter(Boolean)
     }
-  };
+  }
+  if (!Array.isArray(lista)) lista = [lista]
+  return lista.map((i) => {
+    if (typeof i === 'string') return i
+    const nome = i.nome || i.produto || i.name || 'Item'
+    const qtd = i.quantidade || i.qtd || i.qty
+    return qtd ? `${qtd}x ${nome}` : nome
+  })
+}
 
-  // FUNÇÃO PARA ABRIR WHATSAPP
-  const abrirWhatsApp = (telefone, pedidoId) => {
-    const mensagem = `Olá! Seu pedido #${pedidoId} está sendo preparado. Acompanhe o status em tempo real!`;
-    const urlWhatsApp = `https://wa.me/${telefone.replace(/\D/g, '')}?text=${encodeURIComponent(mensagem)}`;
-    window.open(urlWhatsApp, '_blank');
-  };
+// ---------------------------------------------------------------------------
+// Componentes pequenos
+// ---------------------------------------------------------------------------
+function Aviso({ tipo = 'erro', children, onClose }) {
+  const cores =
+    tipo === 'erro'
+      ? 'border-red-200 bg-red-50 text-red-800'
+      : 'border-emerald-200 bg-emerald-50 text-emerald-800'
+  return (
+    <div className={`flex items-start justify-between gap-3 rounded-lg border px-4 py-3 text-sm ${cores}`}>
+      <span>{children}</span>
+      {onClose && (
+        <button onClick={onClose} className="font-medium underline underline-offset-2">
+          Fechar
+        </button>
+      )}
+    </div>
+  )
+}
 
-  // FUNÇÃO PARA ABRIR LOCALIZAÇÃO
-  const abrirLocalizacao = (endereco) => {
-    const urlMaps = `https://www.google.com/maps/search/${encodeURIComponent(endereco)}`;
-    window.open(urlMaps, '_blank');
-  };
+function Campo({ label, children }) {
+  return (
+    <label className="block">
+      <span className="mb-1 block text-sm font-medium text-stone-700">{label}</span>
+      {children}
+    </label>
+  )
+}
 
-  const carregarDados = useCallback(async () => {
-    try {
-      const { data: peds } = await supabase.from("pedidos").select("*").order("created_at", { ascending: false });
-      const { data: prods } = await supabase.from("produtos").select("*");
-      
-      if (peds) {
-        // Detectar novos pedidos
-        const novosPedidos = peds.filter(p => 
-          p.status === "PENDENTE" && 
-          !pedidosAnterior.some(pa => pa.id === p.id)
-        );
-        
-        if (novosPedidos.length > 0) {
-          tocarSomNotificacao();
-          mostrarToast(`🔔 ${novosPedidos.length} novo${novosPedidos.length > 1 ? 's' : ''} pedido${novosPedidos.length > 1 ? 's' : ''}!`);
-        }
-        
-        setPedidosAnterior(peds);
-        setPedidos(peds);
-      }
-      if (prods) setProdutos(prods);
-    } catch (error) {
-      mostrarToast("Erro ao carregar dados");
-    }
-  }, [pedidosAnterior]);
+const inputCls =
+  'w-full rounded-lg border border-stone-300 bg-white px-3 py-2 text-sm text-stone-900 placeholder-stone-400 focus:border-red-600 focus:outline-none focus:ring-2 focus:ring-red-600/20'
+
+// ---------------------------------------------------------------------------
+// Aba: Pedidos
+// ---------------------------------------------------------------------------
+function PedidosTab() {
+  const [pedidos, setPedidos] = useState([])
+  const [carregando, setCarregando] = useState(true)
+  const [erro, setErro] = useState('')
+  const [atualizando, setAtualizando] = useState(null)
+  const [conectado, setConectado] = useState(false)
+
+  const carregar = useCallback(async () => {
+    const { data, error } = await supabase
+      .from('pedidos')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(100)
+    if (error) setErro(`Não foi possível carregar os pedidos: ${error.message}`)
+    else setPedidos(data || [])
+    setCarregando(false)
+  }, [])
 
   useEffect(() => {
-    carregarDados();
-    const channel = supabase.channel("realtime").on("postgres_changes", { event: "*", schema: "public", table: "pedidos" }, () => carregarDados()).subscribe();
-    const channelProd = supabase.channel("realtime-prod").on("postgres_changes", { event: "*", schema: "public", table: "produtos" }, () => carregarDados()).subscribe();
+    carregar()
+
+    const canal = supabase
+      .channel('pedidos-realtime')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'pedidos' }, (payload) => {
+        if (payload.eventType === 'INSERT') {
+          setPedidos((prev) =>
+            prev.some((p) => p.id === payload.new.id) ? prev : [payload.new, ...prev]
+          )
+        } else if (payload.eventType === 'UPDATE') {
+          setPedidos((prev) => prev.map((p) => (p.id === payload.new.id ? payload.new : p)))
+        } else if (payload.eventType === 'DELETE') {
+          setPedidos((prev) => prev.filter((p) => p.id !== payload.old.id))
+        }
+      })
+      .subscribe((status) => setConectado(status === 'SUBSCRIBED'))
+
     return () => {
-      supabase.removeChannel(channel);
-      supabase.removeChannel(channelProd);
-    };
-  }, [carregarDados]);
-
-  const mostrarToast = (msg) => {
-    setToast(msg);
-    setTimeout(() => setToast(""), 3000);
-  };
-
-  const adicionarOuEditarProduto = async () => {
-    if (!novoProd.nome || !novoProd.preco) {
-      mostrarToast("Preencha Nome e Preço!");
-      return;
+      supabase.removeChannel(canal)
     }
+  }, [carregar])
 
-    setLoading(true);
-    try {
-      if (editandoId) {
-        const { error } = await supabase.from("produtos").update({
-          nome: novoProd.nome,
-          preco: Number(novoProd.preco),
-          categoria: novoProd.categoria,
-          descricao: novoProd.descricao,
-          ingredientes: novoProd.ingredientes
-        }).eq("id", editandoId);
-        if (error) throw error;
-        mostrarToast("Produto atualizado!");
-        setEditandoId(null);
-      } else {
-        const { error } = await supabase.from("produtos").insert([{
-          nome: novoProd.nome,
-          preco: Number(novoProd.preco),
-          categoria: novoProd.categoria,
-          descricao: novoProd.descricao,
-          ingredientes: novoProd.ingredientes,
-          ativo: true
-        }]);
-        if (error) throw error;
-        mostrarToast("Produto adicionado!");
-      }
-      setNovoProd({ nome: "", preco: "", categoria: "", descricao: "", ingredientes: "" });
-      await carregarDados();
-    } catch (error) {
-      mostrarToast("Erro: " + error.message);
-    } finally {
-      setLoading(false);
-    }
-  };
+  async function avancar(pedido) {
+    const proximo = STATUS_FLOW[pedido.status]?.next
+    if (!proximo) return
+    setAtualizando(pedido.id)
+    setErro('')
+    const { error } = await supabase.from('pedidos').update({ status: proximo }).eq('id', pedido.id)
+    if (error) setErro(`Não foi possível atualizar o pedido: ${error.message}`)
+    else setPedidos((prev) => prev.map((p) => (p.id === pedido.id ? { ...p, status: proximo } : p)))
+    setAtualizando(null)
+  }
 
-  const deletarProduto = async (id) => {
-    if (!confirm("Excluir item do cardápio?")) return;
-    setLoading(true);
-    try {
-      const { error } = await supabase.from("produtos").delete().eq("id", id);
-      if (error) throw error;
-      mostrarToast("Produto excluído!");
-      await carregarDados();
-    } catch (error) {
-      mostrarToast("Erro: " + error.message);
-    } finally {
-      setLoading(false);
-    }
-  };
+  const porStatus = useMemo(() => {
+    const grupos = { PENDENTE: [], PREPARANDO: [], CONCLUIDO: [] }
+    pedidos.forEach((p) => grupos[p.status]?.push(p))
+    // Fila operacional: mais antigo primeiro nos abertos
+    grupos.PENDENTE.reverse()
+    grupos.PREPARANDO.reverse()
+    grupos.CONCLUIDO = grupos.CONCLUIDO.slice(0, 15)
+    return grupos
+  }, [pedidos])
 
-  const editarProduto = (produto) => {
-    setNovoProd(produto);
-    setEditandoId(produto.id);
-    setAba("cardapio");
-  };
-
-  const atualizarStatus = async (id, status) => {
-    const proximo = { "PENDENTE": "PREPARANDO", "PREPARANDO": "CONCLUIDO" };
-    setLoading(true);
-    try {
-      const { error } = await supabase.from("pedidos").update({ status: proximo[status] }).eq("id", id);
-      if (error) throw error;
-      mostrarToast(`Status atualizado para ${proximo[status]}`);
-      await carregarDados();
-    } catch (error) {
-      mostrarToast("Erro: " + error.message);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const pedidosFiltrados = filtroStatus === "TODOS" 
-    ? pedidos 
-    : pedidos.filter(p => p.status === filtroStatus);
-
-  const pendentesCount = pedidos.filter(p => p.status === "PENDENTE").length;
+  if (carregando) return <p className="py-12 text-center text-stone-500">Carregando pedidos…</p>
 
   return (
-    <div className="min-h-screen bg-slate-50 p-4">
-      {/* Toast */}
-      {toast && (
-        <div className="fixed top-4 right-4 bg-green-500 text-white px-4 py-3 rounded-lg shadow-lg z-50 animate-bounce">
-          {toast}
-        </div>
-      )}
+    <section className="space-y-4">
+      <div className="flex items-center justify-between">
+        <h2 className="text-lg font-semibold text-stone-900">Pedidos</h2>
+        <span className="flex items-center gap-2 text-sm text-stone-500">
+          <span className={`h-2 w-2 rounded-full ${conectado ? 'bg-emerald-500' : 'bg-stone-300'}`} />
+          {conectado ? 'Ao vivo' : 'Reconectando…'}
+        </span>
+      </div>
 
-      {/* Header */}
-      <header className="max-w-7xl mx-auto mb-8">
-        <div className="flex justify-between items-center mb-4">
-          <h1 className="text-3xl font-black text-orange-600">Tudo na Massa</h1>
-          {pendentesCount > 0 && (
-            <span className="bg-red-500 text-white px-3 py-1 rounded-full font-bold text-sm animate-pulse">
-              {pendentesCount} pendente{pendentesCount > 1 ? "s" : ""}
-            </span>
-          )}
+      {erro && <Aviso onClose={() => setErro('')}>{erro}</Aviso>}
+
+      <div className="grid gap-4 lg:grid-cols-3">
+        {COLUNAS.map((col) => (
+          <div key={col.key} className="rounded-xl bg-stone-100 p-3">
+            <div className="mb-3 flex items-center justify-between px-1">
+              <h3 className="flex items-center gap-2 text-sm font-semibold text-stone-800">
+                <span className={`h-2.5 w-2.5 rounded-full ${col.dot}`} />
+                {col.titulo}
+              </h3>
+              <span className="rounded-full bg-white px-2 py-0.5 text-xs font-medium text-stone-600">
+                {porStatus[col.key].length}
+              </span>
+            </div>
+
+            <div className="space-y-3">
+              {porStatus[col.key].length === 0 && (
+                <p className="px-1 py-6 text-center text-sm text-stone-400">Nenhum pedido aqui.</p>
+              )}
+
+              {porStatus[col.key].map((p) => {
+                const fluxo = STATUS_FLOW[p.status]
+                return (
+                  <article key={p.id} className="rounded-lg bg-white p-4 shadow-sm ring-1 ring-stone-200">
+                    <div className="flex items-baseline justify-between gap-2">
+                      <h4 className="font-semibold text-stone-900">{p.cliente_nome || 'Cliente'}</h4>
+                      <time className="text-xs text-stone-500">{horaCurta(p.created_at)}</time>
+                    </div>
+                    <ul className="mt-2 space-y-0.5 text-sm text-stone-700">
+                      {formatarItens(p.itens).map((item, i) => (
+                        <li key={i}>{item}</li>
+                      ))}
+                    </ul>
+                    {fluxo?.next && (
+                      <button
+                        onClick={() => avancar(p)}
+                        disabled={atualizando === p.id}
+                        className="mt-3 w-full rounded-lg bg-red-600 px-3 py-2 text-sm font-medium text-white transition hover:bg-red-700 disabled:opacity-50"
+                      >
+                        {atualizando === p.id ? 'Atualizando…' : fluxo.label}
+                      </button>
+                    )}
+                  </article>
+                )
+              })}
+            </div>
+          </div>
+        ))}
+      </div>
+    </section>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Aba: Cardápio
+// ---------------------------------------------------------------------------
+function CardapioTab() {
+  const [produtos, setProdutos] = useState([])
+  const [carregando, setCarregando] = useState(true)
+  const [form, setForm] = useState(FORM_VAZIO)
+  const [salvando, setSalvando] = useState(false)
+  const [erro, setErro] = useState('')
+  const [ok, setOk] = useState('')
+
+  const carregar = useCallback(async () => {
+    const { data, error } = await supabase
+      .from('produtos')
+      .select('*')
+      .order('categoria', { ascending: true })
+      .order('nome', { ascending: true })
+    if (error) setErro(`Não foi possível carregar o cardápio: ${error.message}`)
+    else setProdutos(data || [])
+    setCarregando(false)
+  }, [])
+
+  useEffect(() => {
+    carregar()
+  }, [carregar])
+
+  const set = (campo) => (e) =>
+    setForm((f) => ({ ...f, [campo]: e.target.type === 'checkbox' ? e.target.checked : e.target.value }))
+
+  async function cadastrar(e) {
+    e.preventDefault()
+    setErro('')
+    setOk('')
+
+    const preco = parseFloat(String(form.preco).replace(',', '.'))
+    if (!form.nome.trim()) return setErro('Informe o nome do produto.')
+    if (Number.isNaN(preco) || preco < 0) return setErro('Informe um preço válido.')
+
+    setSalvando(true)
+    const { data, error } = await supabase
+      .from('produtos')
+      .insert({
+        nome: form.nome.trim(),
+        preco,
+        categoria: form.categoria.trim() || 'Sem categoria',
+        descricao: form.descricao.trim(),
+        ingredientes: form.ingredientes.trim(),
+        ativo: form.ativo,
+      })
+      .select()
+      .single()
+    setSalvando(false)
+
+    if (error) return setErro(`Não foi possível cadastrar: ${error.message}`)
+    setProdutos((prev) => [...prev, data])
+    setForm(FORM_VAZIO)
+    setOk('Produto cadastrado.')
+  }
+
+  async function alternarAtivo(produto) {
+    setErro('')
+    const { error } = await supabase.from('produtos').update({ ativo: !produto.ativo }).eq('id', produto.id)
+    if (error) return setErro(`Não foi possível atualizar: ${error.message}`)
+    setProdutos((prev) => prev.map((p) => (p.id === produto.id ? { ...p, ativo: !p.ativo } : p)))
+  }
+
+  async function excluir(produto) {
+    if (!window.confirm(`Excluir "${produto.nome}"? Essa ação não pode ser desfeita.`)) return
+    setErro('')
+    const { error } = await supabase.from('produtos').delete().eq('id', produto.id)
+    if (error) return setErro(`Não foi possível excluir: ${error.message}`)
+    setProdutos((prev) => prev.filter((p) => p.id !== produto.id))
+  }
+
+  const porCategoria = useMemo(() => {
+    const mapa = {}
+    produtos.forEach((p) => {
+      const cat = p.categoria || 'Sem categoria'
+      ;(mapa[cat] ||= []).push(p)
+    })
+    return Object.entries(mapa)
+  }, [produtos])
+
+  const categoriasExistentes = useMemo(
+    () => [...new Set(produtos.map((p) => p.categoria).filter(Boolean))],
+    [produtos]
+  )
+
+  return (
+    <section className="grid gap-6 lg:grid-cols-[22rem_1fr]">
+      {/* Formulário */}
+      <form
+        onSubmit={cadastrar}
+        className="h-fit space-y-4 rounded-xl bg-white p-5 shadow-sm ring-1 ring-stone-200 lg:sticky lg:top-4"
+      >
+        <h2 className="text-lg font-semibold text-stone-900">Novo produto</h2>
+
+        {erro && <Aviso onClose={() => setErro('')}>{erro}</Aviso>}
+        {ok && <Aviso tipo="ok" onClose={() => setOk('')}>{ok}</Aviso>}
+
+        <Campo label="Nome">
+          <input className={inputCls} value={form.nome} onChange={set('nome')} placeholder="Ex.: Lasanha à bolonhesa" />
+        </Campo>
+
+        <div className="grid grid-cols-2 gap-3">
+          <Campo label="Preço (R$)">
+            <input
+              className={inputCls}
+              inputMode="decimal"
+              value={form.preco}
+              onChange={set('preco')}
+              placeholder="0,00"
+            />
+          </Campo>
+          <Campo label="Categoria">
+            <input
+              className={inputCls}
+              list="categorias"
+              value={form.categoria}
+              onChange={set('categoria')}
+              placeholder="Massas"
+            />
+            <datalist id="categorias">
+              {categoriasExistentes.map((c) => (
+                <option key={c} value={c} />
+              ))}
+            </datalist>
+          </Campo>
         </div>
-        <div className="flex gap-6 mt-4">
-          <button 
-            onClick={() => setAba("pedidos")} 
-            className={`font-bold text-lg transition-all ${aba === "pedidos" ? "text-orange-600 border-b-2 border-orange-600" : "text-slate-600"}`}
-          >
-            Pedidos
-          </button>
-          <button 
-            onClick={() => setAba("cardapio")} 
-            className={`font-bold text-lg transition-all ${aba === "cardapio" ? "text-orange-600 border-b-2 border-orange-600" : "text-slate-600"}`}
-          >
-            Cardápio
-          </button>
+
+        <Campo label="Descrição">
+          <textarea className={inputCls} rows={2} value={form.descricao} onChange={set('descricao')} />
+        </Campo>
+
+        <Campo label="Ingredientes">
+          <textarea
+            className={inputCls}
+            rows={2}
+            value={form.ingredientes}
+            onChange={set('ingredientes')}
+            placeholder="Separe por vírgula"
+          />
+        </Campo>
+
+        <label className="flex items-center gap-2 text-sm text-stone-700">
+          <input
+            type="checkbox"
+            checked={form.ativo}
+            onChange={set('ativo')}
+            className="h-4 w-4 rounded border-stone-300 text-red-600 focus:ring-red-600"
+          />
+          Disponível no cardápio
+        </label>
+
+        <button
+          type="submit"
+          disabled={salvando}
+          className="w-full rounded-lg bg-red-600 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-red-700 disabled:opacity-50"
+        >
+          {salvando ? 'Salvando…' : 'Cadastrar produto'}
+        </button>
+      </form>
+
+      {/* Lista */}
+      <div className="space-y-6">
+        <h2 className="text-lg font-semibold text-stone-900">
+          Cardápio <span className="font-normal text-stone-500">({produtos.length})</span>
+        </h2>
+
+        {carregando && <p className="py-8 text-center text-stone-500">Carregando cardápio…</p>}
+
+        {!carregando && produtos.length === 0 && (
+          <p className="rounded-xl border border-dashed border-stone-300 py-12 text-center text-stone-500">
+            Nenhum produto ainda. Cadastre o primeiro ao lado.
+          </p>
+        )}
+
+        {porCategoria.map(([categoria, itens]) => (
+          <div key={categoria}>
+            <h3 className="mb-2 text-sm font-semibold text-stone-600">{categoria}</h3>
+            <ul className="divide-y divide-stone-200 overflow-hidden rounded-xl bg-white shadow-sm ring-1 ring-stone-200">
+              {itens.map((p) => (
+                <li key={p.id} className="flex flex-col gap-3 p-4 sm:flex-row sm:items-start sm:justify-between">
+                  <div className={`min-w-0 ${p.ativo ? '' : 'opacity-50'}`}>
+                    <div className="flex flex-wrap items-baseline gap-x-3">
+                      <span className="font-medium text-stone-900">{p.nome}</span>
+                      <span className="text-sm font-semibold text-red-700">{brl(p.preco)}</span>
+                    </div>
+                    {p.descricao && <p className="mt-0.5 text-sm text-stone-600">{p.descricao}</p>}
+                    {p.ingredientes && (
+                      <p className="mt-0.5 text-xs text-stone-500">Ingredientes: {p.ingredientes}</p>
+                    )}
+                  </div>
+                  <div className="flex shrink-0 gap-2">
+                    <button
+                      onClick={() => alternarAtivo(p)}
+                      className="rounded-lg border border-stone-300 px-3 py-1.5 text-sm text-stone-700 hover:bg-stone-50"
+                    >
+                      {p.ativo ? 'Desativar' : 'Ativar'}
+                    </button>
+                    <button
+                      onClick={() => excluir(p)}
+                      className="rounded-lg border border-red-200 px-3 py-1.5 text-sm text-red-700 hover:bg-red-50"
+                    >
+                      Excluir
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ))}
+      </div>
+    </section>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// App
+// ---------------------------------------------------------------------------
+export default function App() {
+  const [aba, setAba] = useState('pedidos')
+
+  const abas = [
+    { id: 'pedidos', nome: 'Pedidos' },
+    { id: 'cardapio', nome: 'Cardápio' },
+  ]
+
+  return (
+    <div className="min-h-screen bg-stone-50 text-stone-900">
+      <header className="border-b border-stone-200 bg-white">
+        <div className="mx-auto flex max-w-6xl flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
+          <h1 className="text-xl font-bold text-stone-900">Tudo na Massa</h1>
+          <nav className="flex gap-1 rounded-lg bg-stone-100 p-1" aria-label="Seções">
+            {abas.map((a) => (
+              <button
+                key={a.id}
+                onClick={() => setAba(a.id)}
+                aria-current={aba === a.id ? 'page' : undefined}
+                className={`flex-1 rounded-md px-4 py-1.5 text-sm font-medium transition sm:flex-none ${
+                  aba === a.id ? 'bg-white text-red-700 shadow-sm' : 'text-stone-600 hover:text-stone-900'
+                }`}
+              >
+                {a.nome}
+              </button>
+            ))}
+          </nav>
         </div>
       </header>
 
-      <main className="max-w-7xl mx-auto">
-        {aba === "pedidos" ? (
-          <div>
-            {/* Filtros de Status */}
-            <div className="mb-6 flex gap-2 flex-wrap">
-              {["TODOS", "PENDENTE", "PREPARANDO", "CONCLUIDO"].map(status => (
-                <button
-                  key={status}
-                  onClick={() => setFiltroStatus(status)}
-                  className={`px-4 py-2 rounded-lg font-bold transition-all ${
-                    filtroStatus === status
-                      ? "bg-orange-600 text-white"
-                      : "bg-slate-200 text-slate-700 hover:bg-slate-300"
-                  }`}
-                >
-                  {status}
-                </button>
-              ))}
-            </div>
-
-            {/* Grid de Pedidos */}
-            <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {pedidosFiltrados.map(p => (
-                <div 
-                  key={p.id} 
-                  className={`bg-white p-5 rounded-2xl shadow-md border-2 transition-all cursor-pointer ${
-                    p.status === "PENDENTE" 
-                      ? "border-red-400 hover:shadow-lg hover:border-red-600" 
-                      : "border-slate-200 hover:border-orange-400 hover:shadow-lg"
-                  }`}
-                  onClick={() => setPedidoSelecionado(p)}
-                >
-                  <div className="flex justify-between items-start mb-3">
-                    <div>
-                      <h2 className="font-black text-lg">#{p.id}</h2>
-                      <p className="text-sm text-slate-600 font-semibold">{p.cliente_nome}</p>
-                    </div>
-                    <span className={`font-bold px-3 py-1 rounded-full text-xs whitespace-nowrap ${
-                      p.status === "PENDENTE" ? "bg-red-100 text-red-700" :
-                      p.status === "PREPARANDO" ? "bg-yellow-100 text-yellow-700" :
-                      "bg-green-100 text-green-700"
-                    }`}>
-                      {p.status}
-                    </span>
-                  </div>
-
-                  {/* Telefone */}
-                  <div className="mb-3 pb-3 border-b border-slate-200">
-                    <p className="text-xs text-slate-500">Telefone</p>
-                    <p className="font-bold text-slate-900">{p.cliente_telefone}</p>
-                  </div>
-
-                  {/* Tipo de Consumo e Localização */}
-                  <div className="mb-3 pb-3 border-b border-slate-200">
+      <main className="mx-auto max-w-6xl px-4 py-6">
+        {aba === 'pedidos' ? <PedidosTab /> : <CardapioTab />}
+      </main>
+    </div>
+  )
+        }
+    er-slate-200">
                     <p className="text-xs text-slate-500">
                       {p.tipo_consumo === "DELIVERY" ? "📍 Endereço" : "🏪 Mesa"}
                     </p>
